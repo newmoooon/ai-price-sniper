@@ -93,14 +93,6 @@ export async function trackProduct(input: {
     // ── AI extraction (the expensive step — do it before any DB write) ──
     const snapshot = await fetchProductSnapshot(url);
 
-    // Is this URL brand new? Only first-time tracks get the 30-day
-    // baseline backfill — re-submits already have real history.
-    const { data: existing } = await getSupabase()
-      .from("products")
-      .select("id")
-      .eq("url", url)
-      .maybeSingle();
-
     // ── Persist (parameterized via the Supabase SDK throughout) ─────────
     const { data: product, error: upsertError } = await getSupabase()
       .from("products")
@@ -120,12 +112,23 @@ export async function trackProduct(input: {
 
     await insertLog(product.id, snapshot);
 
-    // ── 30-day baseline backfill (first-time tracks only) ───────────────
+    // ── 30-day baseline backfill ─────────────────────────────────────────
     // Gemini + web search reconstructs how the item was priced over the
     // past month so the chart opens with context, not a single dot. Rows
     // are flagged `is_estimate` and can never satisfy deal/alert logic.
+    // Runs for any product that has no baseline yet (covers both new URLs
+    // and re-tracks of products from before this feature existed) — once
+    // estimated rows exist, it never runs again for that product.
     // Strictly best-effort: a backfill failure never fails the track.
-    if (!existing) {
+    const { data: existingEstimate } = await getSupabase()
+      .from("price_logs")
+      .select("id")
+      .eq("product_id", product.id)
+      .eq("is_estimate", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (!existingEstimate) {
       try {
         const baseline = await estimateHistoricalBaseline(url, snapshot);
         if (baseline.length > 0) {
