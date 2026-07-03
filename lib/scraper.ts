@@ -67,7 +67,40 @@ export function normalizeProductUrl(raw: string): string {
 
   // Tracking fragments never change the product — strip for clean dedupe.
   parsed.hash = "";
+  stripTrackingParams(parsed);
   return parsed.toString();
+}
+
+/**
+ * Ad/analytics query params identify the *click*, not the product. Stripping
+ * them means the same product pasted from a Google ad and from the address
+ * bar dedupes to one tracked row (products.url is unique). Blocklist only —
+ * params that select the product (variant, size, color, sku…) are kept.
+ */
+const TRACKING_PARAM_PREFIXES = ["utm_", "gad_", "mc_", "pk_", "mtm_"];
+const TRACKING_PARAMS = new Set([
+  "gclid", "gclsrc", "gbraid", "wbraid", // Google Ads
+  "fbclid", "igshid", // Meta
+  "msclkid", // Microsoft Ads
+  "ttclid", "twclid", "epik", "dclid", "yclid", // TikTok/X/Pinterest/etc.
+  "srsltid", // Google Merchant listings
+  "_ga", "_gl", // GA cross-domain linker
+  "ref", "ref_", "affid", "affiliate", "cmpid", "cid", "sscid", "irclickid",
+  // Wunderkind/attribution params (seen on SKIMS ad links)
+  "wpsrc", "wpcid", "wpscid", "wpcrid", "wpkwid", "wpkwn", "wpkmatch", "wpsnetn",
+]);
+
+function stripTrackingParams(url: URL): void {
+  const toDelete: string[] = [];
+  for (const key of url.searchParams.keys()) {
+    const k = key.toLowerCase();
+    if (TRACKING_PARAMS.has(k) || TRACKING_PARAM_PREFIXES.some((p) => k.startsWith(p))) {
+      toDelete.push(key);
+    }
+  }
+  for (const key of toDelete) url.searchParams.delete(key);
+  // `?` with nothing behind it is just noise.
+  if ([...url.searchParams.keys()].length === 0) url.search = "";
 }
 
 /* ─────────────────────── Anti-bot browser identity ─────────────────────── */

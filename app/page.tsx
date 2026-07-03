@@ -169,8 +169,20 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let cancelled = false;
+    getDashboardData().then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setProducts(result.data);
+      } else {
+        setProducts([]);
+        setError(result.error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /* ── derived state ── */
   const selected = useMemo(() => {
@@ -674,10 +686,6 @@ function AnalysisPanel({ product, onUpdate }: { product: Product; onUpdate: (p: 
 function useCountUp(target: number): number {
   const [value, setValue] = useState(0);
   useEffect(() => {
-    if (target === 0) {
-      setValue(0);
-      return;
-    }
     let start: number | null = null;
     let raf = 0;
     const duration = 650;

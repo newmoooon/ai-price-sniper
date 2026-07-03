@@ -236,19 +236,30 @@ export async function askAssistant(history: ChatMessage[]): Promise<ActionResult
       .order("checked_at", { referencedTable: "price_logs", ascending: true });
     if (error) throw new Error(error.message);
 
-    const context = ((products ?? []) as Product[]).map((p) => ({
-      product: p.product_name,
-      store: new URL(p.url).hostname.replace(/^www\./, ""),
-      target_price: p.target_price,
-      status: p.last_error ? `last check failed: ${p.last_error}` : "monitored",
-      // Most recent 10 checks, oldest → newest
-      history: p.price_logs.slice(-10).map((l) => ({
-        date: l.checked_at.slice(0, 10),
-        price: l.price,
-        currency: l.currency_code,
-        stock: l.stock_status,
-      })),
-    }));
+    const context = ((products ?? []) as Product[]).map((p) => {
+      // Estimated baseline rows are chart context, not observations — the
+      // assistant should only reason from real scraped checks.
+      const observed = p.price_logs.filter((l) => !l.is_estimate);
+      const latest = observed[observed.length - 1];
+      return {
+        product: p.product_name,
+        store: new URL(p.url).hostname.replace(/^www\./, ""),
+        product_page: p.url,
+        target_price: p.target_price,
+        status: p.last_error ? `last check failed: ${p.last_error}` : "monitored",
+        // What our engine read off the store's own product page, and when.
+        live_price_scraped_from_store_page: latest
+          ? { price: latest.price, currency: latest.currency_code, checked_at: latest.checked_at }
+          : null,
+        // Most recent 10 real checks, oldest → newest
+        history: observed.slice(-10).map((l) => ({
+          date: l.checked_at.slice(0, 10),
+          price: l.price,
+          currency: l.currency_code,
+          stock: l.stock_status,
+        })),
+      };
+    });
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === "your-gemini-api-key") {
@@ -273,7 +284,12 @@ export async function askAssistant(history: ChatMessage[]): Promise<ActionResult
 The user's live dashboard data (their tracked products and recent price checks):
 ${JSON.stringify(context, null, 1)}
 
-You can use Google Search. Use it when the user asks where else a product is sold, whether it's cheaper at another store, whether a logged price looks accurate, or anything needing current market info. When you cite other stores, name the store and the price you found.
+You can use Google Search. Use it when the user asks where else a product is sold, whether it's cheaper at another store, or anything needing current market info. When you cite other stores, name the store and the price you found.
+
+How to weigh sources — this matters:
+- "live_price_scraped_from_store_page" was read directly off that store's own product page at the timestamp shown. For THAT store, it is the ground truth. Never tell the user their dashboard price is wrong for the tracked store based on a search result — search snippets are often days or weeks stale, region-specific, or for a different size/color variant.
+- Web search results are leads, not facts. When a search result claims a different price at the SAME store the dashboard tracks, say the dashboard reflects the live page and the search result is likely outdated — do not present the search price as current.
+- Prices you find at OTHER stores are genuinely useful — cite them, but add that they should be confirmed on the store's page since search data can lag.
 
 Rules:
 - For questions about their own tracking (trends, targets, buy-now-or-wait), ground answers in the dashboard data above and cite actual prices and dates.

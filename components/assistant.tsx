@@ -66,7 +66,9 @@ export function Assistant() {
   // `send` closes over current state; keep a live ref so the global
   // askSniper() event always reaches the latest version.
   const sendRef = useRef(send);
-  sendRef.current = send;
+  useEffect(() => {
+    sendRef.current = send;
+  });
   useEffect(() => {
     function onAsk(e: Event) {
       setOpen(true);
