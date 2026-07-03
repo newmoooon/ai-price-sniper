@@ -1,8 +1,10 @@
 "use server";
 
+import { headers } from "next/headers";
 import { getSupabase } from "@/utils/supabase";
 import { fetchProductSnapshot, normalizeProductUrl, SnapshotError } from "@/lib/scraper";
 import { estimateHistoricalBaseline } from "@/lib/backfill";
+import { rateLimit } from "@/lib/ratelimit";
 import type {
   ActionResult,
   AssistantReply,
@@ -29,6 +31,20 @@ import type {
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RATE_LIMIT_MESSAGE = "You're doing that a lot — give it a minute and try again.";
+
+/**
+ * Per-IP limiter for actions that burn scraping/Gemini quota. Returns true
+ * when the caller is over the limit. Best-effort by design (see
+ * lib/ratelimit.ts); IP comes from the platform's forwarding headers.
+ */
+async function overLimit(action: string, limitPerMinute: number): Promise<boolean> {
+  const h = await headers();
+  const ip =
+    h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown";
+  return !rateLimit(`${action}:${ip}`, limitPerMinute);
+}
 
 /**
  * The error boundary: detailed log on the server console, clean message
@@ -78,6 +94,8 @@ export async function trackProduct(input: {
   email: string;
 }): Promise<ActionResult<Product>> {
   try {
+    if (await overLimit("track", 5)) return { ok: false, error: RATE_LIMIT_MESSAGE };
+
     // ── Validation & sanitization (the trust boundary) ──────────────────
     const url = normalizeProductUrl(input.url); // throws SnapshotError on anything unsafe
     // Email is optional: empty = dashboard-only tracking, no alert emails.
@@ -180,6 +198,9 @@ export async function getDashboardData(): Promise<ActionResult<Product[]>> {
  */
 export async function recheckProduct(productId: string): Promise<ActionResult<Product>> {
   try {
+    if (!UUID_RE.test(productId)) return { ok: false, error: "That product no longer exists." };
+    if (await overLimit("recheck", 10)) return { ok: false, error: RATE_LIMIT_MESSAGE };
+
     const supabase = getSupabase();
     const { data: product, error } = await supabase
       .from("products")
@@ -218,7 +239,23 @@ export async function recheckProduct(productId: string): Promise<ActionResult<Pr
  */
 export async function askAssistant(history: ChatMessage[]): Promise<ActionResult<AssistantReply>> {
   try {
+    if (await overLimit("assistant", 10)) return { ok: false, error: RATE_LIMIT_MESSAGE };
+
     // ── Validate the conversation shape (it crosses the trust boundary) ──
+    // The client is typed, but the wire isn't: every element must actually
+    // be a { role, content } pair before anything downstream touches it.
+    if (
+      !Array.isArray(history) ||
+      history.some(
+        (m) =>
+          !m ||
+          typeof m !== "object" ||
+          (m.role !== "user" && m.role !== "assistant") ||
+          typeof m.content !== "string"
+      )
+    ) {
+      return { ok: false, error: "Ask a question first." };
+    }
     const trimmed = history.slice(-12); // cap context growth
     const last = trimmed[trimmed.length - 1];
     if (!last || last.role !== "user" || !last.content.trim()) {
@@ -331,6 +368,7 @@ export async function updateTargetPrice(
   targetPrice: number
 ): Promise<ActionResult<Product>> {
   try {
+    if (!UUID_RE.test(productId)) return { ok: false, error: "That product no longer exists." };
     const price = Number(targetPrice);
     if (!Number.isFinite(price) || price <= 0 || price > 1_000_000) {
       return { ok: false, error: "Target price must be a positive number." };
@@ -350,6 +388,7 @@ export async function updateTargetPrice(
 /** Stop tracking. price_logs rows cascade-delete with the product. */
 export async function deleteProduct(productId: string): Promise<ActionResult<null>> {
   try {
+    if (!UUID_RE.test(productId)) return { ok: false, error: "That product no longer exists." };
     const { error } = await getSupabase().from("products").delete().eq("id", productId);
     if (error) throw new Error(error.message);
     return { ok: true, data: null };

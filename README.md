@@ -30,7 +30,7 @@ Fill in:
 
 | Variable | Where to get it |
 |---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | supabase.com → Project Settings → API |
+| `SUPABASE_URL` / `SUPABASE_SECRET_KEY` | supabase.com → Project Settings → API keys (use the **secret** / service_role key — it never leaves the server) |
 | `GEMINI_API_KEY` | aistudio.google.com/apikey |
 | `RESEND_API_KEY` | resend.com → API Keys (100 emails/day free) |
 | `CRON_SECRET` | any long random string, e.g. `openssl rand -hex 32` |
@@ -40,7 +40,10 @@ Fill in:
 In the Supabase dashboard → SQL Editor, run **`supabase/schema.sql`** (fresh install —
 it includes everything). If you created tables from an older version, apply the
 incremental migrations instead: `supabase/migration_v2_email_alerts.sql`, then
-`supabase/migration_v3_hardening.sql` (multi-currency + link-health).
+`migration_v3_hardening.sql` (multi-currency + link-health), then
+`migration_v4_estimated_history.sql` (30-day baseline), then
+`migration_v5_lockdown.sql` (revokes the anon key's database access — set
+`SUPABASE_SECRET_KEY` first, in that order, or the app loses DB access).
 
 ### 4. Run
 
@@ -83,10 +86,18 @@ supabase/schema.sql     tables, indexes, RLS policies
 
 ## Security notes
 
+- **Database lockdown** — the browser never talks to Supabase. All access goes
+  through Server Actions using `SUPABASE_SECRET_KEY`, and `migration_v5_lockdown.sql`
+  strips the public anon key of every table privilege (RLS enabled, zero policies),
+  so leaking the anon key leaks nothing.
 - **URL sanitization** — every user URL passes the native `URL` constructor with a
-  scheme allowlist (blocks `javascript:`/`data:` XSS vectors) and an SSRF guard
-  (blocks localhost, `.local`/`.internal`, and IP-literal hosts) before it reaches
-  `fetch`, cheerio, or the database.
+  scheme allowlist (blocks `javascript:`/`data:` XSS vectors) and an SSRF guard:
+  localhost/`.local`/`.internal`/IP-literal hosts and non-standard ports are
+  rejected, every hostname is DNS-resolved and refused if any address is
+  private/link-local/metadata-range, and redirects are followed manually with
+  the full validation re-run on every hop.
+- **Rate limiting** — the scrape- and Gemini-burning actions (track, re-check,
+  assistant) are rate-limited per IP (best-effort, in-memory).
 - **SQL injection** — all queries go through the Supabase SDK's parameterized
   query builder; there is no raw SQL or string concatenation anywhere.
 - **Cron protection** — `/api/cron` requires `Authorization: Bearer $CRON_SECRET`,

@@ -57,7 +57,7 @@ function renderDealEmail(alert: DealAlert): string {
             <p style="margin:0 0 4px;color:#52514e;font-size:14px;">is now selling for</p>
             <p style="margin:0 0 4px;color:#0b0b0b;font-size:40px;font-weight:800;">${usd(alert.currentPrice)}</p>
             ${savedLine}
-            <a href="${alert.productUrl}"
+            <a href="${escapeHtml(alert.productUrl)}"
                style="display:inline-block;background:#0b0b0b;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;">
               Grab the deal →
             </a>

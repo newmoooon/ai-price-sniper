@@ -44,15 +44,12 @@ create index if not exists price_logs_product_time_idx
   on public.price_logs (product_id, checked_at);
 
 -- ── Row Level Security ───────────────────────────────────────────────────
--- This demo app has no auth, so we allow the anon key full access.
--- If you add Supabase Auth later, replace these with per-user policies.
+-- RLS is enabled with NO policies: the anon and authenticated roles can't
+-- touch these tables at all. All access goes through the app's server code,
+-- which authenticates with SUPABASE_SECRET_KEY (service role, bypasses RLS).
+-- If you add Supabase Auth later, add per-user policies here instead.
 alter table public.products   enable row level security;
 alter table public.price_logs enable row level security;
 
-create policy "anon full access to products"
-  on public.products for all
-  to anon using (true) with check (true);
-
-create policy "anon full access to price_logs"
-  on public.price_logs for all
-  to anon using (true) with check (true);
+revoke all on table public.products   from anon;
+revoke all on table public.price_logs from anon;

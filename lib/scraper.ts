@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import * as cheerio from "cheerio";
 import { GoogleGenAI, Type } from "@google/genai";
 import type { ProductSnapshot, StockStatus } from "@/lib/types";
@@ -47,6 +48,11 @@ export function normalizeProductUrl(raw: string): string {
   // Embedded credentials are a phishing/SSRF smell, never a product link.
   if (parsed.username || parsed.password) {
     throw new SnapshotError("Links containing login credentials aren't supported.");
+  }
+  // Real stores serve on the default ports. An explicit odd port is how an
+  // SSRF probe reaches internal services (…:6379, …:8080/admin, …).
+  if (parsed.port && parsed.port !== "80" && parsed.port !== "443") {
+    throw new SnapshotError("Links with a non-standard port aren't supported.");
   }
 
   // SSRF guard: real retailers are public hostnames, never IP literals or
@@ -103,6 +109,69 @@ function stripTrackingParams(url: URL): void {
   if ([...url.searchParams.keys()].length === 0) url.search = "";
 }
 
+/* ─────────────────── DNS-level SSRF guard (post-parse) ─────────────────── */
+
+/**
+ * A hostname can look public and still resolve to a private address (DNS
+ * pointing 169.254.169.254 at shop.attacker.com costs nothing). Before any
+ * fetch, resolve the host and refuse if ANY of its addresses is
+ * private/loopback/link-local/multicast — v4 or v6.
+ *
+ * Residual risk: DNS rebinding (answer changes between our lookup and
+ * fetch's own). Eliminating that requires pinning the socket to the checked
+ * IP (custom undici Agent/proxy). Accepted for now: this app runs on
+ * serverless with no LAN behind it, and the metadata-service class of
+ * target is covered by the checks below.
+ */
+async function assertResolvesPublic(hostname: string): Promise<void> {
+  let addresses: { address: string }[];
+  try {
+    addresses = await lookup(hostname, { all: true });
+  } catch {
+    throw new SnapshotError("Couldn't reach that URL. Check the link and your connection.");
+  }
+  if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address))) {
+    throw new SnapshotError("That address can't be tracked. Paste a public store link like https://www.amazon.com/…");
+  }
+}
+
+function isPrivateAddress(ip: string): boolean {
+  if (ip.includes(":")) return isPrivateIPv6(ip);
+  return isPrivateIPv4(ip);
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = parts;
+  return (
+    a === 0 || // "this network"
+    a === 10 || // RFC 1918
+    a === 127 || // loopback
+    (a === 100 && b >= 64 && b <= 127) || // CGNAT 100.64/10
+    (a === 169 && b === 254) || // link-local + cloud metadata
+    (a === 172 && b >= 16 && b <= 31) || // RFC 1918
+    (a === 192 && b === 168) || // RFC 1918
+    (a === 192 && b === 0) || // IETF protocol assignments / TEST-NET-1
+    (a === 198 && (b === 18 || b === 19)) || // benchmarking
+    a >= 224 // multicast, reserved, broadcast
+  );
+}
+
+function isPrivateIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  // IPv4-mapped (::ffff:10.0.0.1) — judge the embedded v4 address.
+  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isPrivateIPv4(mapped[1]);
+  return (
+    lower === "::" ||
+    lower === "::1" || // loopback
+    /^fe[89ab]/.test(lower) || // link-local fe80::/10
+    /^f[cd]/.test(lower) || // unique-local fc00::/7
+    /^fe[cdf]/.test(lower) // deprecated site-local fec0::/10
+  );
+}
+
 /* ─────────────────────── Anti-bot browser identity ─────────────────────── */
 
 /**
@@ -138,27 +207,59 @@ export function randomBrowserHeaders(): Record<string, string> {
 
 /* ──────────────────────────── The pipeline ─────────────────────────────── */
 
-/** Step 1 — fetch the raw HTML, wearing a randomized browser identity. */
+const MAX_REDIRECTS = 5;
+
+/**
+ * Step 1 — fetch the raw HTML, wearing a randomized browser identity.
+ *
+ * Redirects are followed MANUALLY so every hop passes the same trust
+ * boundary as user input: `redirect: "follow"` would happily chase a
+ * public URL's 302 into localhost or the cloud metadata service.
+ */
 async function fetchRawHtml(url: string): Promise<string> {
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      redirect: "follow",
-      headers: randomBrowserHeaders(),
-      cache: "no-store",
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === "TimeoutError") {
-      throw new SnapshotError("The store took too long to respond. Try again in a moment.");
+  const headers = randomBrowserHeaders(); // one identity across all hops
+
+  let current = url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertResolvesPublic(new URL(current).hostname);
+
+    let res: Response;
+    try {
+      res = await fetch(current, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        redirect: "manual",
+        headers,
+        cache: "no-store",
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new SnapshotError("The store took too long to respond. Try again in a moment.");
+      }
+      throw new SnapshotError("Couldn't reach that URL. Check the link and your connection.");
     }
-    throw new SnapshotError("Couldn't reach that URL. Check the link and your connection.");
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) {
+        throw new SnapshotError(`The store returned an error (HTTP ${res.status}). The product page may be blocked or gone.`);
+      }
+      let next: string;
+      try {
+        next = new URL(location, current).toString(); // resolve relative Location
+      } catch {
+        throw new SnapshotError("The store returned a broken redirect. Try the final product URL directly.");
+      }
+      current = normalizeProductUrl(next); // full re-validation, every hop
+      continue;
+    }
+
+    if (!res.ok) {
+      throw new SnapshotError(`The store returned an error (HTTP ${res.status}). The product page may be blocked or gone.`);
+    }
+    return res.text();
   }
 
-  if (!res.ok) {
-    throw new SnapshotError(`The store returned an error (HTTP ${res.status}). The product page may be blocked or gone.`);
-  }
-  return res.text();
+  throw new SnapshotError("That link redirects too many times. Paste the final product URL directly.");
 }
 
 /**
