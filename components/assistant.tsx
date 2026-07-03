@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
-import { ArrowUp, Crosshair, MessageCircle, X } from "lucide-react";
+import { ArrowUp, Crosshair, ExternalLink, MessageCircle, Store, X } from "lucide-react";
 
 import { askAssistant } from "@/app/actions";
-import type { ChatMessage } from "@/lib/types";
+import type { AssistantSource, ChatMessage } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -52,10 +52,13 @@ export function Assistant() {
     setMessages(next);
     setInput("");
     startTransition(async () => {
-      const result = await askAssistant(next);
+      // Only role + content cross the wire — source cards are render state.
+      const result = await askAssistant(next.map(({ role, content }) => ({ role, content })));
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: result.ok ? result.data : result.error },
+        result.ok
+          ? { role: "assistant", content: result.data.reply, sources: result.data.sources }
+          : { role: "assistant", content: result.error },
       ]);
     });
   }
@@ -89,7 +92,7 @@ export function Assistant() {
         <div
           role="dialog"
           aria-label="Sniper assistant chat"
-          className="fixed bottom-20 right-5 z-40 flex h-[min(560px,calc(100dvh-7rem))] w-[min(380px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border bg-card shadow-2xl"
+          className="drawer-in fixed bottom-20 right-5 z-40 flex h-[min(560px,calc(100dvh-7rem))] w-[min(380px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border bg-card shadow-2xl"
         >
           {/* Header */}
           <div className="flex items-center gap-2.5 border-b px-4 py-3">
@@ -126,16 +129,20 @@ export function Assistant() {
             )}
 
             {messages.map((message, i) => (
-              <div
-                key={i}
-                className={cn(
-                  "max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm",
-                  message.role === "user"
-                    ? "ml-auto rounded-tr-md bg-primary text-primary-foreground"
-                    : "rounded-tl-md bg-muted"
+              <div key={i} className={cn("space-y-2", message.role === "user" && "flex justify-end")}>
+                <div
+                  className={cn(
+                    "max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm",
+                    message.role === "user"
+                      ? "rounded-tr-md bg-primary text-primary-foreground"
+                      : "rounded-tl-md bg-muted"
+                  )}
+                >
+                  {message.content}
+                </div>
+                {message.sources && message.sources.length > 0 && (
+                  <SourceCards sources={message.sources} />
                 )}
-              >
-                {message.content}
               </div>
             ))}
 
@@ -179,5 +186,38 @@ export function Assistant() {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Tappable store cards under a web-grounded answer — where the assistant
+ * actually found the item. Links open through Google's grounding redirect
+ * (that's what the API returns), in a new tab.
+ */
+function SourceCards({ sources }: { sources: AssistantSource[] }) {
+  return (
+    <div className="max-w-[85%] space-y-1.5">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        Found at
+      </p>
+      {sources.map((source) => (
+        <a
+          key={source.url}
+          href={source.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="group flex items-center gap-2.5 rounded-xl border bg-background px-3 py-2 transition-colors hover:border-primary/40 hover:bg-muted/50"
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Store className="h-3.5 w-3.5" aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{source.title}</span>
+          <ExternalLink
+            className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+            aria-hidden
+          />
+        </a>
+      ))}
+    </div>
   );
 }

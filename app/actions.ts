@@ -2,7 +2,14 @@
 
 import { getSupabase } from "@/utils/supabase";
 import { fetchProductSnapshot, normalizeProductUrl, SnapshotError } from "@/lib/scraper";
-import type { ActionResult, ChatMessage, Product, ProductSnapshot } from "@/lib/types";
+import { estimateHistoricalBaseline } from "@/lib/backfill";
+import type {
+  ActionResult,
+  AssistantReply,
+  ChatMessage,
+  Product,
+  ProductSnapshot,
+} from "@/lib/types";
 
 /**
  * Server Actions — the only path from the client to the database or the
@@ -86,6 +93,14 @@ export async function trackProduct(input: {
     // ── AI extraction (the expensive step — do it before any DB write) ──
     const snapshot = await fetchProductSnapshot(url);
 
+    // Is this URL brand new? Only first-time tracks get the 30-day
+    // baseline backfill — re-submits already have real history.
+    const { data: existing } = await getSupabase()
+      .from("products")
+      .select("id")
+      .eq("url", url)
+      .maybeSingle();
+
     // ── Persist (parameterized via the Supabase SDK throughout) ─────────
     const { data: product, error: upsertError } = await getSupabase()
       .from("products")
@@ -104,6 +119,34 @@ export async function trackProduct(input: {
     if (upsertError || !product) throw new Error(upsertError?.message ?? "Failed to save product.");
 
     await insertLog(product.id, snapshot);
+
+    // ── 30-day baseline backfill (first-time tracks only) ───────────────
+    // Gemini + web search reconstructs how the item was priced over the
+    // past month so the chart opens with context, not a single dot. Rows
+    // are flagged `is_estimate` and can never satisfy deal/alert logic.
+    // Strictly best-effort: a backfill failure never fails the track.
+    if (!existing) {
+      try {
+        const baseline = await estimateHistoricalBaseline(url, snapshot);
+        if (baseline.length > 0) {
+          const { error: backfillError } = await getSupabase()
+            .from("price_logs")
+            .insert(
+              baseline.map((point) => ({
+                product_id: product.id,
+                price: point.price,
+                currency_code: snapshot.currency_code,
+                stock_status: "unknown" as const,
+                is_estimate: true,
+                checked_at: point.checked_at,
+              }))
+            );
+          if (backfillError) throw new Error(backfillError.message);
+        }
+      } catch (err) {
+        console.error("[actions] 30-day baseline backfill skipped:", err);
+      }
+    }
 
     return { ok: true, data: await fetchProductWithLogs(product.id) };
   } catch (err) {
@@ -170,7 +213,7 @@ export async function recheckProduct(productId: string): Promise<ActionResult<Pr
  * shopping advice. Stateless by design: the client sends the visible
  * conversation, the server rebuilds fresh context every call.
  */
-export async function askAssistant(history: ChatMessage[]): Promise<ActionResult<string>> {
+export async function askAssistant(history: ChatMessage[]): Promise<ActionResult<AssistantReply>> {
   try {
     // ── Validate the conversation shape (it crosses the trust boundary) ──
     const trimmed = history.slice(-12); // cap context growth
@@ -241,12 +284,23 @@ Rules:
     const answer = response.text?.trim();
     if (!answer) return { ok: false, error: "The assistant didn't respond. Try again." };
 
-    // Surface where a web-grounded answer came from (plain text, max 3).
+    // Surface where a web-grounded answer came from as structured store
+    // links, so the UI can render tappable source cards (deduped by store,
+    // max 4). Only http(s) grounding URLs are passed through.
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-    const sources = [...new Set(chunks.map((c) => c.web?.title).filter(Boolean))].slice(0, 3);
-    const suffix = sources.length > 0 ? `\n\nSources: ${sources.join(", ")}` : "";
+    const seen = new Set<string>();
+    const sources: AssistantReply["sources"] = [];
+    for (const chunk of chunks) {
+      const title = chunk.web?.title?.trim();
+      const url = chunk.web?.uri?.trim();
+      if (!title || !url || seen.has(title)) continue;
+      if (!/^https?:\/\//i.test(url)) continue;
+      seen.add(title);
+      sources.push({ title, url });
+      if (sources.length >= 4) break;
+    }
 
-    return { ok: true, data: answer + suffix };
+    return { ok: true, data: { reply: answer, sources } };
   } catch (err) {
     return { ok: false, error: toErrorMessage(err) };
   }

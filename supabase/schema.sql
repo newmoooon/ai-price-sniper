@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════════════
--- AI Price Sniper — fresh install schema (v2, includes email alerting)
+-- AI Price Sniper — fresh install schema (v4, includes estimated history)
 -- Run this in the Supabase SQL Editor: Dashboard → SQL Editor → New query
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -31,6 +31,10 @@ create table if not exists public.price_logs (
   -- v3: ISO 4217 code extracted by Gemini alongside the price, so the UI
   -- can format $/£/€ correctly instead of assuming USD.
   currency_code text not null default 'USD' check (char_length(currency_code) = 3),
+  -- v4: true for the AI-estimated 30-day baseline inserted when tracking
+  -- starts. Estimated rows are chart-only context: they never count as
+  -- "target hit" and never trigger alert emails.
+  is_estimate  boolean not null default false,
   checked_at   timestamptz not null default now()
 );
 

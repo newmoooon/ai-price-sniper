@@ -9,6 +9,12 @@ export interface PriceLog {
   stock_status: StockStatus;
   /** ISO 4217 code extracted by Gemini (e.g. USD, GBP, EUR) */
   currency_code: string;
+  /**
+   * True for the AI-estimated 30-day baseline written when tracking starts.
+   * Estimated rows are chart/context only — they must never satisfy
+   * "target hit", trigger alerts, or count as a real observation.
+   */
+  is_estimate: boolean;
   checked_at: string; // ISO timestamp
 }
 
@@ -53,6 +59,11 @@ export function latestLog(product: Product): PriceLog | null {
     : null;
 }
 
+/** Only real checks — the AI-estimated 30-day baseline filtered out. */
+export function observedLogs(product: Product): PriceLog[] {
+  return product.price_logs.filter((l) => !l.is_estimate);
+}
+
 export function productStatus(product: Product): ProductStatus {
   // A failed last check outranks everything: whatever price we have is stale.
   if (product.last_error) return "invalid";
@@ -72,10 +83,12 @@ export function productCurrency(product: Product): string {
  * When the price reached the user's target: the first log of the CURRENT
  * below-target streak (so "hit your target on Jun 30" survives later
  * checks that stay low, but resets if the price bounced back above).
+ * Only real observations count — an estimated baseline point at/below
+ * target is a guess, not a deal we actually saw.
  */
 export function targetHit(product: Product): PriceLog | null {
   let hit: PriceLog | null = null;
-  for (const log of product.price_logs) {
+  for (const log of observedLogs(product)) {
     if (log.price <= product.target_price) {
       if (!hit) hit = log; // start of a streak
     } else {
@@ -85,8 +98,23 @@ export function targetHit(product: Product): PriceLog | null {
   return hit;
 }
 
+/** One web source behind a grounded assistant answer (store link card). */
+export interface AssistantSource {
+  /** Usually the store's domain, e.g. "bestbuy.com" */
+  title: string;
+  url: string;
+}
+
+/** A grounded assistant answer: the reply text + the stores it cited. */
+export interface AssistantReply {
+  reply: string;
+  sources: AssistantSource[];
+}
+
 /** One turn in the assistant conversation (client ↔ server action). */
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Store links behind an assistant answer — client-side render only. */
+  sources?: AssistantSource[];
 }

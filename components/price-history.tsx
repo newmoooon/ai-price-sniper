@@ -40,7 +40,9 @@ export function PriceHistory({ product }: { product: Product }) {
             // `logs` is newest-first, so the previous check is the NEXT row.
             const prev = logs[i + 1];
             const delta = prev ? log.price - prev.price : null;
-            const hitTarget = log.price <= product.target_price;
+            // An estimated baseline point at/below target is a guess, not a
+            // deal we saw — no highlight, no badge.
+            const hitTarget = !log.is_estimate && log.price <= product.target_price;
 
             return (
               <tr
@@ -51,8 +53,8 @@ export function PriceHistory({ product }: { product: Product }) {
                   {new Date(log.checked_at).toLocaleString("en-US", {
                     month: "short",
                     day: "numeric",
-                    hour: "numeric",
-                    minute: "2-digit",
+                    // Backfilled timestamps carry no meaningful time of day.
+                    ...(log.is_estimate ? {} : { hour: "numeric", minute: "2-digit" }),
                   })}
                 </td>
                 <td className="px-3 py-2 text-right font-medium tabular-nums">
@@ -60,12 +62,19 @@ export function PriceHistory({ product }: { product: Product }) {
                     {hitTarget && (
                       <BadgeCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-label="At or below target" />
                     )}
+                    {log.is_estimate && (
+                      <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground">
+                        est.
+                      </span>
+                    )}
                     {formatMoney(log.price, log.currency_code)}
                   </span>
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">
                   {delta === null ? (
-                    <span className="text-muted-foreground">first check</span>
+                    <span className="text-muted-foreground">
+                      {log.is_estimate ? "baseline start" : "first check"}
+                    </span>
                   ) : delta === 0 ? (
                     <span className="inline-flex items-center gap-0.5 text-muted-foreground">
                       <Minus className="h-3 w-3" aria-hidden /> no change

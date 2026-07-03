@@ -38,6 +38,7 @@ import {
 } from "@/app/actions";
 import {
   latestLog,
+  observedLogs,
   productCurrency,
   productStatus,
   targetHit,
@@ -45,7 +46,7 @@ import {
   type ProductStatus,
 } from "@/lib/types";
 import { formatMoney } from "@/lib/format";
-import { dropConfidence } from "@/lib/trend";
+import { dealTier, dropConfidence, type DealTier } from "@/lib/trend";
 import { askSniper, Assistant } from "@/components/assistant";
 import { PriceChart } from "@/components/price-chart";
 import { PriceHistory } from "@/components/price-history";
@@ -93,6 +94,50 @@ function StatusBadge({ status }: { status: ProductStatus }) {
         </Badge>
       );
   }
+}
+
+/**
+ * "Deal Tier" — the live price positioned against the full historical
+ * array (real checks + the estimated 30-day baseline). Emoji + text carry
+ * the meaning together, so the tier is never conveyed by color alone.
+ */
+const DEAL_TIER_STYLE: Record<DealTier, { label: string; className: string }> = {
+  all_time_low: {
+    label: "🔥 All-Time Low",
+    className: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  },
+  below_average: {
+    label: "📉 Below Average",
+    className: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+  average: {
+    label: "💎 Average Price",
+    className: "bg-primary/10 text-primary",
+  },
+  above_average: {
+    label: "📈 Above Average",
+    className: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  },
+  scalper: {
+    label: "⚠️ Scalper Pricing Detected",
+    className: "bg-red-500/10 text-red-700 dark:text-red-400",
+  },
+};
+
+function DealTierBadge({ product }: { product: Product }) {
+  const tier = dealTier(product.price_logs);
+  if (!tier) return null;
+  const { label, className } = DEAL_TIER_STYLE[tier];
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+        className
+      )}
+    >
+      {label}
+    </span>
+  );
 }
 
 /* ────────────────────────── page ────────────────────────── */
@@ -310,7 +355,7 @@ export default function Dashboard() {
               <div className="mt-3 space-y-2">
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Sparkles className="h-3 w-3 text-primary" aria-hidden />
-                  Fetching the page, stripping the DOM, and asking Gemini to read it — usually 5–15 seconds.
+                  Fetching the page, asking Gemini to read it, then researching a 30-day price baseline — usually 10–30 seconds.
                 </p>
                 {/* Indeterminate shimmer so the wait feels alive */}
                 <div className="h-1 overflow-hidden rounded-full bg-muted">
@@ -377,7 +422,7 @@ export default function Dashboard() {
               <StatTile label="Deals reached" value={dealCount} highlight={dealCount > 0} />
               <StatTile
                 label="Price points logged"
-                value={products.reduce((n, p) => n + p.price_logs.length, 0)}
+                value={products.reduce((n, p) => n + observedLogs(p).length, 0)}
               />
             </div>
 
@@ -710,6 +755,7 @@ function ProductCard({
             <span className="text-2xl font-semibold tabular-nums">
               {log ? formatMoney(log.price, log.currency_code) : "—"}
             </span>
+            <DealTierBadge product={product} />
             <span className="text-xs text-muted-foreground">
               target {formatMoney(product.target_price, currency)}
             </span>
@@ -727,7 +773,8 @@ function ProductCard({
 
         <div className="flex items-center justify-between">
           <p className="text-xs text-muted-foreground">
-            {product.price_logs.length} check{product.price_logs.length === 1 ? "" : "s"}
+            {observedLogs(product).length} check{observedLogs(product).length === 1 ? "" : "s"}
+            {product.price_logs.some((l) => l.is_estimate) && " · 30-day baseline"}
             {log && ` · last ${new Date(log.checked_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`}
           </p>
           <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
@@ -793,9 +840,10 @@ function Sparkline({ product }: { product: Product }) {
   );
 }
 
-/** "↓ 12% since tracking" chip — overall move from the first logged price. */
+/** "↓ 12% since tracking" chip — overall move from the first REAL check
+ *  (the estimated baseline is context, not something we tracked). */
 function TrendChip({ product }: { product: Product }) {
-  const logs = product.price_logs;
+  const logs = observedLogs(product);
   if (logs.length < 2) return null;
   const first = logs[0].price;
   const last = logs[logs.length - 1].price;

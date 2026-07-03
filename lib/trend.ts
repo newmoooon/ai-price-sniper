@@ -56,3 +56,34 @@ export function dropConfidence(logs: PriceLog[]): number | null {
 function clamp01(n: number): number {
   return Math.min(1, Math.max(0, n));
 }
+
+/* ─────────────────────────── Deal tier ─────────────────────────── */
+
+/**
+ * "Is today's price actually good?" — the live price positioned against
+ * the full historical array (real checks + the estimated 30-day baseline;
+ * the baseline exists precisely to make this comparison meaningful on
+ * day one). Same philosophy as dropConfidence: a transparent deterministic
+ * rule, not an LLM opinion.
+ */
+export type DealTier = "all_time_low" | "below_average" | "average" | "above_average" | "scalper";
+
+/** Null when history is too thin for the comparison to mean anything. */
+export function dealTier(logs: PriceLog[]): DealTier | null {
+  if (logs.length < 5) return null;
+
+  const prices = logs.map((l) => l.price);
+  const current = prices[prices.length - 1];
+  const min = Math.min(...prices);
+  const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
+  if (mean <= 0 || current <= 0) return null;
+
+  // Within half a percent of the historical floor counts as AT the floor —
+  // penny-level jitter between checks shouldn't cost the headline badge.
+  if (current <= min * 1.005) return "all_time_low";
+  // ≥20% over the typical price is scalper/price-gouge territory.
+  if (current >= mean * 1.2) return "scalper";
+  if (current >= mean * 1.05) return "above_average";
+  if (current <= mean * 0.95) return "below_average";
+  return "average";
+}

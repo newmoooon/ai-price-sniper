@@ -213,6 +213,16 @@
 .rise-3 { animation-delay: 0.26s; }
 .rise-4 { animation-delay: 0.38s; }
 
+/* Chat drawer: slides up from the launcher with a slight scale settle. */
+@keyframes drawer-in {
+  from { opacity: 0; transform: translateY(18px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.drawer-in {
+  animation: drawer-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transform-origin: bottom right;
+}
+
 /* Hover lift for interactive cards. */
 .lift {
   transition: transform 0.2s ease, box-shadow 0.2s ease;
