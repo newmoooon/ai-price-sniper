@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Lint & build
+    runs-on: ubuntu-latest
+    env:
+      # Placeholder values — the build only needs the vars to exist.
+      # Real secrets live in the deployment platform, never in CI.
+      SUPABASE_URL: https://dummy.supabase.co
+      SUPABASE_SECRET_KEY: dummy
+      GEMINI_API_KEY: dummy
+      RESEND_API_KEY: re_dummy
+      CRON_SECRET: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
