@@ -23,6 +23,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # npm install (not ci): the committed lockfile is generated on macOS and
+      # omits Linux-only optional deps (@emnapi/*); install adds them at runtime.
+      - run: npm install --no-audit --no-fund
       - run: npm run lint
       - run: npm run build
