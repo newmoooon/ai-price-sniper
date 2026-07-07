@@ -20,6 +20,9 @@ export class SnapshotError extends Error {}
 // leaving plenty of room for long product pages. ~16k chars ≈ 4k tokens.
 const MAX_CLEAN_TEXT_CHARS = 16_000;
 const FETCH_TIMEOUT_MS = 15_000;
+// A product page is a few hundred KB of HTML at most. Cap the download so a
+// hostile URL streaming gigabytes can't exhaust serverless memory (DoS).
+const MAX_RESPONSE_BYTES = 3 * 1024 * 1024;
 
 /* ────────────────────── URL sanitization (SSRF/XSS) ────────────────────── */
 
@@ -256,10 +259,45 @@ async function fetchRawHtml(url: string): Promise<string> {
     if (!res.ok) {
       throw new SnapshotError(`The store returned an error (HTTP ${res.status}). The product page may be blocked or gone.`);
     }
-    return res.text();
+    return readBodyCapped(res);
   }
 
   throw new SnapshotError("That link redirects too many times. Paste the final product URL directly.");
+}
+
+/**
+ * Reads a response body but refuses to buffer more than MAX_RESPONSE_BYTES —
+ * `res.text()` on an attacker-controlled URL would happily buffer gigabytes.
+ * Content-Length can't be trusted (chunked encoding omits it), so the cap is
+ * enforced on the actual stream.
+ */
+async function readBodyCapped(res: Response): Promise<string> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    throw new SnapshotError("That page is too large to analyze — paste a direct product page link.");
+  }
+  if (!res.body) return res.text();
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new SnapshotError("That page is too large to analyze — paste a direct product page link.");
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
 }
 
 /**

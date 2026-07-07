@@ -369,6 +369,7 @@ export async function updateTargetPrice(
 ): Promise<ActionResult<Product>> {
   try {
     if (!UUID_RE.test(productId)) return { ok: false, error: "That product no longer exists." };
+    if (await overLimit("mutate", 30)) return { ok: false, error: RATE_LIMIT_MESSAGE };
     const price = Number(targetPrice);
     if (!Number.isFinite(price) || price <= 0 || price > 1_000_000) {
       return { ok: false, error: "Target price must be a positive number." };
@@ -389,6 +390,7 @@ export async function updateTargetPrice(
 export async function deleteProduct(productId: string): Promise<ActionResult<null>> {
   try {
     if (!UUID_RE.test(productId)) return { ok: false, error: "That product no longer exists." };
+    if (await overLimit("mutate", 30)) return { ok: false, error: RATE_LIMIT_MESSAGE };
     const { error } = await getSupabase().from("products").delete().eq("id", productId);
     if (error) throw new Error(error.message);
     return { ok: true, data: null };
